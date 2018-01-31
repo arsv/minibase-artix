@@ -327,7 +327,7 @@ sub deploy_packages
 	my $pkg;
 	my $script = 'rootfs.sh';
 
-	#remover('rootfs');
+	remover('rootfs');
 	mkdir('rootfs');
 
 	open(TEMP, '>', $script) || die;
@@ -349,8 +349,7 @@ sub deploy_packages
 	select STDOUT;
 	close(TEMP);
 
-	spawn(qw(touch rootfs.tmp));
-	spawn(qw(fakeroot -i rootfs.tmp -s rootfs.tmp), 'sh', $script);
+	spawn(qw(fakeroot -s rootfs.tmp), 'sh', $script);
 }
 
 sub fix_xorg_fonts_dir

@@ -18,4 +18,6 @@ umask 0002
 mkdir /run/ctrl
 mkdir /dev/input
 
+/sbin/symlink /dev/fd /proc/self/fd
+
 exec /sbin/service/super /sbin/system/reboot
