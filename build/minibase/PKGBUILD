@@ -1,0 +1,33 @@
+pkgname=minibase
+pkgver=0.6.1
+pkgrel=1
+pkgdesc="static early userspace tools"
+arch=('x86_64')
+url="https://github.com/arsv/minibase"
+license=('GPL')
+makedepends=('gcc' 'make' 'binutils')
+source=(https://github.com/arsv/minibase/archive/0.6.1.tar.gz
+	0001-udevmod-increase-event-buffer-size.patch
+	0002-keymon-fix-pollfds-update.patch)
+
+prepare() {
+	cd minibase-0.6.1
+	patch -Np1 -i ../0001-udevmod-increase-event-buffer-size.patch
+	patch -Np1 -i ../0002-keymon-fix-pollfds-update.patch
+}
+
+build() {
+	cd minibase-0.6.1
+	unset CFLAGS
+	./configure
+	make
+}
+
+package() {
+	cd minibase-0.6.1
+	make DESTDIR="$pkgdir/" install
+}
+
+md5sums=('eaf572e20f24b3310c719ea63fcc0ca6'
+         '94e22a3f95f39c7daa79ffc128254226'
+         '1d4a3a860d8247e203121f9314c14562')

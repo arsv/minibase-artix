@@ -1,0 +1,584 @@
+From bbd18211d6a6762b1b141f8f181a741eb6f13bed Mon Sep 17 00:00:00 2001
+From: Alex Suykov <alex.suykov@gmail.com>
+Date: Mon, 29 Jan 2018 13:15:15 +0200
+Subject: [PATCH xserver 8/8] add support for weston-launch protocol
+
+As a device access protocol, it is similar to but simpler than
+the dbus based one that logind uses.
+
+Unlike logind, weston-launch needs device name to re-open the device.
+To handle this, path was added to InputInfoRec.
+
+Support for weston-launch must be explicitly requested at configure time.
+---
+ configure.ac                                |  50 +++--
+ hw/xfree86/common/xf86Init.c                |   4 +
+ hw/xfree86/common/xf86Xinput.c              |  11 +-
+ hw/xfree86/common/xf86Xinput.h              |   2 +
+ hw/xfree86/os-support/linux/Makefile.am     |   4 +
+ hw/xfree86/os-support/linux/lnx_platform.c  |   3 +
+ hw/xfree86/os-support/linux/weston-launch.c | 317 ++++++++++++++++++++++++++++
+ include/dix-config.h.in                     |   3 +
+ include/weston-launch.h                     |   9 +
+ 9 files changed, 386 insertions(+), 17 deletions(-)
+ create mode 100644 hw/xfree86/os-support/linux/weston-launch.c
+ create mode 100644 include/weston-launch.h
+
+diff --git a/configure.ac b/configure.ac
+index 76c8baa6f..8fd1a14f6 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -644,6 +644,7 @@ AC_ARG_ENABLE(pciaccess, AS_HELP_STRING([--enable-pciaccess], [Build Xorg with p
+ AC_ARG_ENABLE(linux_acpi, AS_HELP_STRING([--disable-linux-acpi], [Disable building ACPI support on Linux (if available).]), [enable_linux_acpi=$enableval], [enable_linux_acpi=yes])
+ AC_ARG_ENABLE(linux_apm, AS_HELP_STRING([--disable-linux-apm], [Disable building APM support on Linux (if available).]), [enable_linux_apm=$enableval], [enable_linux_apm=yes])
+ AC_ARG_ENABLE(systemd-logind, AS_HELP_STRING([--enable-systemd-logind], [Build systemd-logind support (default: auto)]), [SYSTEMD_LOGIND=$enableval], [SYSTEMD_LOGIND=auto])
++AC_ARG_ENABLE(weston-launch, AS_HELP_STRING([--enable-weston-launch], [Enable support for weston-launch protocol (default: no)]), [WESTON_LAUNCH=$enableval], [WESTON_LAUNCH=no])
+ AC_ARG_ENABLE(suid-wrapper, AS_HELP_STRING([--enable-suid-wrapper], [Build suid-root wrapper for legacy driver support on rootless xserver systems (default: no)]), [SUID_WRAPPER=$enableval], [SUID_WRAPPER=no])
+ 
+ dnl DDXes.
+@@ -973,25 +974,46 @@ if test "x$CONFIG_HAL" = xyes; then
+ fi
+ AM_CONDITIONAL(CONFIG_HAL, [test "x$CONFIG_HAL" = xyes])
+ 
+-if test "x$SYSTEMD_LOGIND" = xauto; then
+-        if test "x$HAVE_DBUS" = xyes -a "x$CONFIG_UDEV" = xyes ; then
+-                SYSTEMD_LOGIND=yes
+-        else
++DEVMANAGER=none
++
++if test "x$WESTON_LAUNCH" = xauto; then
++	WESTON_LAUNCH=no
++fi
++if test "x$WESTON_LAUNCH" = xyes; then
++	if test "x$SYSTEMD_LOGIND" = xyes; then
++		AC_MSG_ERROR([cannot enable both systemd-logind and weston-launch.])
++	elif test "x$SYSTEMD_LOGIND" = xauto; then
+                 SYSTEMD_LOGIND=no
+-        fi
++	fi
++
++	AC_DEFINE(WESTON_LAUNCH, 1, [Enable weston-launch support code])
++
++	DEVMANAGER=weston
++fi
++
++if test "x$SYSTEMD_LOGIND" = xauto; then
++	if test "x$HAVE_DBUS" = xyes -a "x$CONFIG_UDEV" = xyes ; then
++		SYSTEMD_LOGIND=yes
++	else
++		SYSTEMD_LOGIND=no
++	fi
+ fi
+ if test "x$SYSTEMD_LOGIND" = xyes; then
+-        if ! test "x$HAVE_DBUS" = xyes; then
+-                AC_MSG_ERROR([systemd-logind requested, but D-Bus is not installed.])
+-        fi
+-        if ! test "x$CONFIG_UDEV" = xyes ; then
+-                AC_MSG_ERROR([systemd-logind is only supported in combination with udev configuration.])
+-        fi
++	if ! test "x$HAVE_DBUS" = xyes; then
++		AC_MSG_ERROR([systemd-logind requested, but D-Bus is not installed.])
++	fi
++	if ! test "x$CONFIG_UDEV" = xyes ; then
++		AC_MSG_ERROR([systemd-logind is only supported in combination with udev configuration.])
++	fi
++
++	AC_DEFINE(SYSTEMD_LOGIND, 1, [Enable logind support code])
+ 
+-        AC_DEFINE(SYSTEMD_LOGIND, 1, [Enable systemd-logind integration])
+-        NEED_DBUS="yes"
++	DEVMANAGER=logind
++	NEED_DBUS="yes"
+ fi
+-AM_CONDITIONAL(SYSTEMD_LOGIND, [test "x$SYSTEMD_LOGIND" = xyes])
++
++AM_CONDITIONAL(WESTON_LAUNCH,  [test "x$DEVMANAGER" = xweston])
++AM_CONDITIONAL(SYSTEMD_LOGIND, [test "x$DEVMANAGER" = xlogind])
+ 
+ if test "x$SUID_WRAPPER" = xyes; then
+         dnl This is a define so that if some platforms want to put the wrapper
+diff --git a/hw/xfree86/common/xf86Init.c b/hw/xfree86/common/xf86Init.c
+index bad4cedde..9d828b5cb 100644
+--- a/hw/xfree86/common/xf86Init.c
++++ b/hw/xfree86/common/xf86Init.c
+@@ -55,6 +55,7 @@
+ #include "mi.h"
+ #include "dbus-core.h"
+ #include "systemd-logind.h"
++#include "weston-launch.h"
+ 
+ #include "loaderProcs.h"
+ #ifdef XFreeXDGA
+@@ -445,6 +446,9 @@ InitOutput(ScreenInfo * pScreenInfo, int argc, char **argv)
+ #ifdef SYSTEMD_LOGIND
+         systemd_logind_init();
+ #endif
++#ifdef WESTON_LAUNCH
++        weston_launch_init();
++#endif
+ 
+         /* Do a general bus probe.  This will be a PCI probe for x86 platforms */
+         xf86BusProbe();
+diff --git a/hw/xfree86/common/xf86Xinput.c b/hw/xfree86/common/xf86Xinput.c
+index 4f0ab3661..b10003d80 100644
+--- a/hw/xfree86/common/xf86Xinput.c
++++ b/hw/xfree86/common/xf86Xinput.c
+@@ -64,6 +64,7 @@
+ #include "extinit.h"
+ #include "loaderProcs.h"
+ #include "systemd-logind.h"
++#include "weston-launch.h"
+ 
+ #include "exevents.h"           /* AddInputDevice */
+ #include "exglobals.h"
+@@ -745,6 +746,7 @@ xf86AllocateInput(void)
+ 
+     pInfo->fd = -1;
+     pInfo->type_name = "UNKNOWN";
++    pInfo->path = NULL;
+ 
+     return pInfo;
+ }
+@@ -808,6 +810,9 @@ xf86DeleteInput(InputInfoPtr pInp, int flags)
+         /* Else the entry wasn't in the xf86InputDevs list (ignore this). */
+     }
+ 
++    if (pInp->path)
++        free(pInp->path);
++
+     free((void *) pInp->driver);
+     free((void *) pInp->name);
+     xf86optionListFree(pInp->options);
+@@ -923,6 +928,8 @@ xf86NewInputDevice(InputInfoPtr pInfo, DeviceIntPtr *pdev, BOOL enable)
+     if (path && drv->capabilities & XI86_DRV_CAP_SERVER_FD){
+ #ifdef SYSTEMD_LOGIND
+         fd = systemd_logind_take_fd(pInfo->major, pInfo->minor, path, &paused);
++#elif defined(WESTON_LAUNCH)
++        fd = weston_launch_open(path);
+ #else
+         fd = open(path, O_RDONLY | O_CLOEXEC);
+ #endif
+@@ -935,18 +942,16 @@ xf86NewInputDevice(InputInfoPtr pInfo, DeviceIntPtr *pdev, BOOL enable)
+ 
+                 xorg_list_append(&new_device->node, &new_input_devices_list);
+                 systemd_logind_release_fd(pInfo->major, pInfo->minor, fd);
+-                free(path);
+                 return BadMatch;
+             }
+ #endif
+             pInfo->fd = fd;
++            pInfo->path = path;
+             pInfo->flags |= XI86_SERVER_FD;
+             pInfo->options = xf86ReplaceIntOption(pInfo->options, "fd", fd);
+         }
+     }
+ 
+-    free(path);
+-
+     xf86AddInput(drv, pInfo);
+ 
+     input_lock();
+diff --git a/hw/xfree86/common/xf86Xinput.h b/hw/xfree86/common/xf86Xinput.h
+index 0024053c7..4700557b1 100644
+--- a/hw/xfree86/common/xf86Xinput.h
++++ b/hw/xfree86/common/xf86Xinput.h
+@@ -111,6 +111,8 @@ struct _InputInfoRec {
+     void *module;
+     XF86OptionPtr options;
+     InputAttributes *attrs;
++
++    char *path;
+ };
+ 
+ /* xf86Globals.c */
+diff --git a/hw/xfree86/os-support/linux/Makefile.am b/hw/xfree86/os-support/linux/Makefile.am
+index d8cb17777..135e13182 100644
+--- a/hw/xfree86/os-support/linux/Makefile.am
++++ b/hw/xfree86/os-support/linux/Makefile.am
+@@ -23,6 +23,10 @@ LOGIND_SRCS = systemd-logind.c
+ XORG_CFLAGS += $(DBUS_CFLAGS)
+ endif
+ 
++if WESTON_LAUNCH
++LOGIND_SRCS = weston-launch.c
++endif
++
+ liblinux_la_SOURCES = linux.h lnx_init.c lnx_video.c \
+                      lnx_agp.c lnx_kmod.c lnx_bell.c lnx_platform.c \
+ 		     $(srcdir)/../shared/VTsw_usl.c \
+diff --git a/hw/xfree86/os-support/linux/lnx_platform.c b/hw/xfree86/os-support/linux/lnx_platform.c
+index fe1af0049..26f34de09 100644
+--- a/hw/xfree86/os-support/linux/lnx_platform.c
++++ b/hw/xfree86/os-support/linux/lnx_platform.c
+@@ -19,6 +19,7 @@
+ 
+ #include "hotplug.h"
+ #include "systemd-logind.h"
++#include "weston-launch.h"
+ 
+ static Bool
+ get_drm_info(struct OdevAttributes *attribs, char *path, int delayed_index)
+@@ -34,6 +35,8 @@ get_drm_info(struct OdevAttributes *attribs, char *path, int delayed_index)
+     int minor = attribs->minor;
+ 
+     fd = systemd_logind_take_fd(major, minor, path, &paused);
++#elif defined(WESTON_LAUNCH)
++    fd = weston_launch_open(path);
+ #else
+     fd = open(path, O_RDWR | O_CLOEXEC);
+ #endif
+diff --git a/hw/xfree86/os-support/linux/weston-launch.c b/hw/xfree86/os-support/linux/weston-launch.c
+new file mode 100644
+index 000000000..97624e849
+--- /dev/null
++++ b/hw/xfree86/os-support/linux/weston-launch.c
+@@ -0,0 +1,317 @@
++#ifdef HAVE_XORG_CONFIG_H
++#include <xorg-config.h>
++#endif
++
++#include <sys/types.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#ifdef HAVE_SYS_SYSMACROS_H
++#include <sys/sysmacros.h>
++#endif
++#include <linux/major.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++
++#include "os.h"
++#include "linux.h"
++#include "xf86.h"
++#include "xf86platformBus.h"
++#include "xf86Xinput.h"
++#include "xf86Priv.h"
++#include "globals.h"
++
++#include "weston-launch.h"
++
++#define WESTON_LAUNCHER_OPEN 0
++
++#define WESTON_LAUNCHER_ACTIVATE   1
++#define WESTON_LAUNCHER_DEACTIVATE 2
++
++#ifndef WESTON_LAUNCH
++# error Trying to build weston-launch.c but WESTON_LAUNCH is not defined
++#endif
++
++static int weston_launch_fd;
++
++struct weston_launcher_cmd {
++    int opcode;
++};
++
++struct weston_launcher_open {
++    int opcode;
++    int flags;
++    char path[0];
++};
++
++/* When switching out or returning to a VT, logind sends one notifications
++   (signal in their terms) for each managed device, and does not clearly
++   distinguish between inputs and drms. The X server code then needs to
++   match the dev against either drms (xf86_platform_devices) or inputs
++   (xf86InputDevs), track when all devices have been suspended/resumed.
++
++   In contrast, both weston-launch and vtmux send a single notification
++   when all devices have been disabled or resumed. The X server then only
++   needs to disable or enable all devices it knows about. */
++
++static void disable_drm_devices(void)
++{
++    struct xf86_platform_device *pdev = xf86_platform_devices;
++    struct xf86_platform_device *pend = pdev + xf86_num_platform_devices;
++
++    for (; pdev < pend; pdev++)
++            pdev->flags |= XF86_PDEV_PAUSED;
++}
++
++static void enable_drm_devices(void)
++{
++    struct xf86_platform_device *pdev = xf86_platform_devices;
++    struct xf86_platform_device *pend = pdev + xf86_num_platform_devices;
++
++    for (; pdev < pend; pdev++)
++            pdev->flags &= ~XF86_PDEV_PAUSED;
++}
++
++static void close_input_devices(void)
++{
++    InputInfoPtr pdev;
++
++    for (pdev = xf86InputDevs; pdev; pdev = pdev->next) {
++        if(!(pdev->flags & XI86_SERVER_FD))
++            continue; /* do we ever get non-server-managed devices here? */
++
++        xf86DisableInputDeviceForVTSwitch(pdev);
++
++        close(pdev->fd);
++        pdev->fd = -1;
++        pdev->options = xf86ReplaceIntOption(pdev->options, "fd", pdev->fd);
++    }
++}
++
++static void reopen_input_devices(void)
++{
++    InputInfoPtr pdev;
++
++    for (pdev = xf86InputDevs; pdev; pdev = pdev->next) {
++        if (pdev->fd >= 0)
++            continue;
++        if (!pdev->path)
++            continue;
++
++        pdev->fd = weston_launch_open(pdev->path);
++        pdev->options = xf86ReplaceIntOption(pdev->options, "fd", pdev->fd);
++
++        if(pdev->fd < 0)
++            continue;
++
++        xf86EnableInputDeviceForVTSwitch(pdev);
++    }
++
++    xf86InputEnableVTProbe();
++}
++
++static void activate_vt(void)
++{
++    enable_drm_devices();
++    reopen_input_devices();
++
++    xf86VTEnter();
++}
++
++static void deactivate_vt(void)
++{
++    disable_drm_devices();
++    close_input_devices();
++}
++
++static void socket_handler(int fd, int ready, void *data)
++{
++    int ret, opcode;
++    char buf[64];
++    struct weston_launcher_cmd* msg;
++
++    (void)data;
++    (void)ready;
++
++    ret = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
++
++    if(ret <= 0)
++        return;
++    if(ret < sizeof(*msg))
++        return; /* invalid packet? */
++
++    msg = (void*)buf;
++    opcode = msg->opcode;
++
++    if(opcode == WESTON_LAUNCHER_ACTIVATE)
++        activate_vt();
++    else if(opcode == WESTON_LAUNCHER_DEACTIVATE)
++        deactivate_vt();
++    else
++        LogMessage(X_INFO, "weston-launch unknown opcode %i\n", opcode);
++}
++
++static int set_manager_fd(void)
++{
++    char* fdstr;
++    int fd;
++
++    if ((fdstr = getenv("WESTON_LAUNCHER_SOCK")) == NULL) {
++        LogMessage(X_INFO, "weston-launch missing control socket fd\n");
++        return -1;
++    }
++
++    if ((fd = atoi(fdstr)) <= 2) {
++        LogMessage(X_INFO, "weston-launch invalid control fd %s\n", fdstr);
++        return -1;
++    }
++
++    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
++        LogMessage(X_INFO, "weston-launch cannot set CLOEXEC\n");
++        return -1;
++    }
++
++    weston_launch_fd = fd;
++
++    SetNotifyFd(fd, socket_handler, X_NOTIFY_READ, NULL);
++
++    return 0;
++}
++
++static int set_vt_globals(void)
++{
++    struct stat st;
++
++    if(fstat(0, &st) < 0) {
++        LogMessage(X_INFO, "weston-launch cannot stat fd 0\n");
++        return -1;
++    }
++
++    if(!S_ISCHR(st.st_mode) || major(st.st_rdev) != TTY_MAJOR) {
++        LogMessage(X_INFO, "weston-launch fd 0 is not a tty\n");
++        return -1;
++    }
++
++    xf86Info.vtno = minor(st.st_rdev);
++    xf86Info.dontVTSwitch = TRUE;
++    xf86Info.autoVTSwitch = FALSE;
++    xf86Info.consoleFd = 0;
++
++    serverGeneration = 2;
++
++    return 0;
++}
++
++int weston_launch_init(void)
++{
++    if(set_manager_fd())
++        return -1;
++    if(set_vt_globals())
++        return -1;
++
++    return 0;
++}
++
++static int send_open_request(int fd, const char* path)
++{
++    struct weston_launcher_open *req;
++    int len, ret;
++
++    if (path == NULL) {
++        LogMessage(X_INFO, "weston-launch open NULL\n");
++        return -1;
++    }
++
++    if (strstr(path, "mouse"))
++        return -1;
++
++    len = sizeof(*req) + strlen(path) + 1;
++    req = malloc(len);
++
++    if (!req)
++        return -1;
++
++    req->opcode = WESTON_LAUNCHER_OPEN;
++    req->flags = O_RDWR;
++    strcpy(req->path, path);
++
++    ret = send(fd, req, len, 0);
++
++    free(req);
++
++    if(ret < 0)
++        return -1;
++
++    return 0;
++}
++
++static int recv_open_reply(int fd)
++{
++    struct msghdr msg;
++    struct cmsghdr *cmsg;
++    struct iovec iov;
++    char control[CMSG_SPACE(sizeof(int))];
++    int ret, cmd;
++
++again:
++    memset(&msg, 0, sizeof msg);
++    iov.iov_base = &cmd;
++    iov.iov_len = sizeof cmd;
++    msg.msg_iov = &iov;
++    msg.msg_iovlen = 1;
++    msg.msg_control = control;
++    msg.msg_controllen = sizeof control;
++
++    ret = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
++
++    if (ret < 0)
++        return -1;
++    if (ret < sizeof(int)) {
++        LogMessage(X_INFO, "weston-launch truncated reply\n");
++        return -1;
++    }
++
++    if (cmd < 0) {
++        LogMessage(X_INFO, "weston-launch open returns %i\n", cmd);
++        return cmd;
++    }
++
++    if (cmd > 0) {
++        if (cmd == WESTON_LAUNCHER_DEACTIVATE)
++            deactivate_vt();
++        LogMessage(X_INFO, "weston-launch interrupted request\n");
++        goto again;
++    }
++
++    cmsg = CMSG_FIRSTHDR(&msg);
++
++    if (!cmsg) {
++        LogMessage(X_INFO, "weston-launch got no ancillary data\n");
++        return -1;
++    }
++    if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
++        LogMessage(X_INFO, "weston-launch invalid ancillary data\n");
++        return -1;
++    }
++    if (cmsg->cmsg_len < sizeof(*cmsg) + sizeof(int)) {
++        LogMessage(X_INFO, "weston-launch malformed ancillary data\n");
++        return -1;
++    }
++
++    return *((int*)CMSG_DATA(cmsg));
++}
++
++int weston_launch_open(const char *path)
++{
++    int rfd, sfd = weston_launch_fd;
++
++    if(send_open_request(sfd, path))
++        return -1;
++
++    if((rfd = recv_open_reply(sfd)) < 0)
++        return -1;
++
++    fcntl(rfd, F_SETFL, O_NONBLOCK);
++
++    return rfd;
++}
+diff --git a/include/dix-config.h.in b/include/dix-config.h.in
+index d357910a6..723dd412b 100644
+--- a/include/dix-config.h.in
++++ b/include/dix-config.h.in
+@@ -454,6 +454,9 @@
+ /* Enable systemd-logind integration */
+ #undef SYSTEMD_LOGIND 1
+ 
++/* Enable weston-launch integration */
++#undef WESTON_LAUNCH 1
++
+ /* Have a monotonic clock from clock_gettime() */
+ #undef MONOTONIC_CLOCK
+ 
+diff --git a/include/weston-launch.h b/include/weston-launch.h
+new file mode 100644
+index 000000000..371d31eac
+--- /dev/null
++++ b/include/weston-launch.h
+@@ -0,0 +1,9 @@
++#ifndef WESTON_LAUNCH_H
++#define WESTON_LAUNCH_H
++
++#ifdef WESTON_LAUNCH
++int weston_launch_init(void);
++int weston_launch_open(const char *path);
++#endif
++
++#endif
+-- 
+2.16.1
+

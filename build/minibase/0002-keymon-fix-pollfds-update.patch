@@ -1,0 +1,35 @@
+From 8256511940d4b926a559c55be1ccca05760c3721 Mon Sep 17 00:00:00 2001
+From: Alex Suykov <alex.suykov@gmail.com>
+Date: Wed, 31 Jan 2018 14:01:52 +0200
+Subject: [PATCH 2/2] keymon: fix pollfds update
+
+That's just wrong and without this fix keymon would probably not
+pick up any hotplugged devices.
+---
+ src/misc/keymon_devs.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/misc/keymon_devs.c b/src/misc/keymon_devs.c
+index 6b4ca08..4bd585b 100644
+--- a/src/misc/keymon_devs.c
++++ b/src/misc/keymon_devs.c
+@@ -106,6 +106,8 @@ static void check_dir_ent(char* dir, char* name)
+ 	kb->fd = fd;
+ 	kb->minor = rdev;
+ 
++	pollready = 0;
++
+ 	return;
+ close:
+ 	sys_close(fd);
+@@ -154,7 +156,6 @@ void setup_devices(void)
+ 	}
+ 
+ 	sys_close(fd);
+-	pollready = 0;
+ }
+ 
+ void handle_inotify(int fd)
+-- 
+2.16.1
+

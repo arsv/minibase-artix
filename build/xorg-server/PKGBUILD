@@ -1,0 +1,195 @@
+# $Id$
+# Maintainer: AndyRTR <andyrtr@archlinux.org>
+# Maintainer: Jan de Groot <jgc@archlinux.org>
+
+pkgbase=xorg-server
+pkgname=('xorg-server' 'xorg-server-xwayland' 'xorg-server-common' 'xorg-server-devel')
+pkgver=1.19.6
+pkgrel=1
+arch=('x86_64')
+license=('custom')
+groups=('xorg')
+url="http://xorg.freedesktop.org"
+makedepends=('pixman' 'libx11' 'mesa' 'mesa-libgl' 'xf86driproto' 'xcmiscproto' 'xtrans' 'bigreqsproto' 'randrproto'
+             'inputproto' 'fontsproto' 'videoproto' 'presentproto' 'compositeproto' 'recordproto' 'scrnsaverproto'
+             'resourceproto' 'xineramaproto' 'libxkbfile' 'libxfont2' 'renderproto' 'libpciaccess' 'libxv'
+             'xf86dgaproto' 'libxmu' 'libxrender' 'libxi' 'dmxproto' 'libxaw' 'libdmx' 'libxtst' 'libxres'
+             'xorg-xkbcomp' 'xorg-util-macros' 'xorg-font-util' 'glproto' 'dri2proto' 'libgcrypt' 'libepoxy'
+             'xcb-util' 'xcb-util-image' 'xcb-util-renderutil' 'xcb-util-wm' 'xcb-util-keysyms' 'dri3proto'
+             'libxshmfence' 'libunwind' 'wayland-protocols' 'git')
+source=(https://xorg.freedesktop.org/releases/individual/xserver/${pkgbase}-${pkgver}.tar.bz2
+        0001-nvidia-add-modulepath-support.patch
+        0002-xserver-autobind-hotplug.patch
+        0004-config-udev-skip-tty-inputs.patch
+        0005-config-udev-split-device_added-for-further-work.patch
+        0006-config-udev-drop-ID_INPUT-code.patch
+        0007-move-logind-ifdefs-to-call-sites.patch
+        0008-add-support-for-weston-launch-protocol.patch
+        xvfb-run
+        xvfb-run.1)
+
+prepare() {
+  cd "${pkgbase}-${pkgver}"
+
+  # merged upstream in trunk
+  patch -Np1 -i ../0001-nvidia-add-modulepath-support.patch
+  # patch from Fedora, not yet merged
+  patch -Np1 -i ../0002-xserver-autobind-hotplug.patch
+
+  patch -Np1 -i ../0004-config-udev-skip-tty-inputs.patch
+  patch -Np1 -i ../0005-config-udev-split-device_added-for-further-work.patch
+  patch -Np1 -i ../0006-config-udev-drop-ID_INPUT-code.patch
+  patch -Np1 -i ../0007-move-logind-ifdefs-to-call-sites.patch
+  patch -Np1 -i ../0008-add-support-for-weston-launch-protocol.patch
+
+  autoreconf -vfi
+}
+
+build() {
+  # Since pacman 5.0.2-2, hardened flags are now enabled in makepkg.conf
+  # With them, module fail to load with undefined symbol.
+  # See https://bugs.archlinux.org/task/55102 / https://bugs.archlinux.org/task/54845
+  export CFLAGS=${CFLAGS/-fno-plt}
+  export CXXFLAGS=${CXXFLAGS/-fno-plt}
+  export LDFLAGS=${LDFLAGS/,-z,now}
+
+  cd "${pkgbase}-${pkgver}"
+  ./configure --prefix=/usr \
+      --enable-dri \
+      --enable-composite \
+      --enable-xcsecurity \
+      --enable-libunwind \
+      --enable-xorg \
+      --enable-xephyr \
+      --enable-glamor \
+      --enable-xwayland \
+      --enable-config-udev \
+      --enable-weston-launch \
+      --enable-record \
+      --disable-xfbdev \
+      --disable-xfake \
+      --disable-static \
+      --without-systemd-daemon \
+      --libexecdir=/usr/lib/xorg-server \
+      --sysconfdir=/etc \
+      --localstatedir=/var \
+      --with-xkb-path=/usr/share/X11/xkb \
+      --with-xkb-output=/var/lib/xkb \
+      --with-fontrootdir=/usr/share/fonts \
+      --with-sha1=libgcrypt
+
+#      --without-dtrace \
+#      --disable-linux-acpi --disable-linux-apm \
+
+  make
+
+  # Disable subdirs for make install rule to make splitting easier
+  sed -e 's/^DMX_SUBDIRS =.*/DMX_SUBDIRS =/' \
+      -e 's/^XVFB_SUBDIRS =.*/XVFB_SUBDIRS =/' \
+      -e 's/^XNEST_SUBDIRS =.*/XNEST_SUBDIRS = /' \
+      -e 's/^KDRIVE_SUBDIRS =.*/KDRIVE_SUBDIRS =/' \
+      -e 's/^XWAYLAND_SUBDIRS =.*/XWAYLAND_SUBDIRS =/' \
+      -i hw/Makefile
+}
+
+package_xorg-server-common() {
+  pkgdesc="Xorg server common files"
+  depends=(xkeyboard-config xorg-xkbcomp xorg-setxkbmap)
+
+  cd "${pkgbase}-${pkgver}"
+  install -m755 -d "${pkgdir}/usr/share/licenses/xorg-server-common"
+  install -m644 COPYING "${pkgdir}/usr/share/licenses/xorg-server-common"
+
+  make -C xkb DESTDIR="${pkgdir}" install-data
+
+  install -m755 -d "${pkgdir}/usr/share/man/man1"
+  install -m644 man/Xserver.1 "${pkgdir}/usr/share/man/man1/"
+
+  install -m755 -d "${pkgdir}/usr/lib/xorg"
+  install -m644 dix/protocol.txt "${pkgdir}/usr/lib/xorg/"
+}
+
+package_xorg-server() {
+  pkgdesc="Xorg X server"
+  depends=(libepoxy libxfont2 pixman xorg-server-common libunwind libgl
+           libpciaccess libbsd libdrm libxshmfence) # FS#52949
+
+  # see xorg-server-*/hw/xfree86/common/xf86Module.h for ABI versions - we provide major numbers that drivers can depend on
+  # and /usr/lib/pkgconfig/xorg-server.pc in xorg-server-devel pkg
+  provides=('X-ABI-VIDEODRV_VERSION=23' 'X-ABI-XINPUT_VERSION=24.1' 'X-ABI-EXTENSION_VERSION=10.0' 'x-server')
+  conflicts=('nvidia-utils<=331.20' 'glamor-egl' 'xf86-video-modesetting')
+  replaces=('glamor-egl' 'xf86-video-modesetting')
+  install=xorg-server.install
+
+  cd "${pkgbase}-${pkgver}"
+  make DESTDIR="${pkgdir}" install
+
+  rm -rf "${pkgdir}/var"
+  rm -rf "${pkgdir}/usr/share/X11"
+
+  rm -f "${pkgdir}/usr/share/man/man1/Xserver.1"
+  rm -f "${pkgdir}/usr/lib/xorg/protocol.txt"
+
+  install -m755 -d "${pkgdir}/usr/share/licenses/xorg-server"
+  ln -sf ../xorg-server-common/COPYING "${pkgdir}/usr/share/licenses/xorg-server/COPYING"
+
+  rm -rf "${pkgdir}/usr/lib/pkgconfig"
+  rm -rf "${pkgdir}/usr/include"
+  rm -rf "${pkgdir}/usr/share/aclocal"
+}
+
+package_xorg-server-xwayland() {
+  pkgdesc="run X clients under wayland"
+  depends=(libxfont2 libepoxy libunwind libelogind libgl pixman xorg-server-common)
+
+  cd "${pkgbase}-${pkgver}/hw/xwayland"
+  make DESTDIR="${pkgdir}" install
+
+  install -m755 -d "${pkgdir}/usr/share/licenses/xorg-server-xwayland"
+  ln -sf ../xorg-server-common/COPYING "${pkgdir}/usr/share/licenses/xorg-server-xwayland/COPYING"
+}
+
+package_xorg-server-devel() {
+  pkgdesc="Development files for the X.Org X server"
+  depends=(# see pkgdir/usr/lib/pkgconfig/xorg-server.pc
+           xproto randrproto renderproto xextproto inputproto kbproto 
+           fontsproto pixman videoproto xf86driproto glproto 
+           mesa dri2proto dri3proto xineramaproto libpciaccess
+           resourceproto scrnsaverproto presentproto
+           # not technically required but almost every Xorg pkg needs it to build
+           xorg-util-macros)
+
+  cd "${pkgbase}-${pkgver}"
+  make DESTDIR="${pkgdir}" install
+
+  rm -rf "${pkgdir}/usr/bin"
+  rm -rf "${pkgdir}/usr/share/man"
+  rm -rf "${pkgdir}/usr/share/doc"
+  rm -rf "${pkgdir}/usr/share/X11"
+  rm -rf "${pkgdir}/usr/lib/xorg"
+  rm -rf "${pkgdir}/usr/lib/xorg-server"
+  rm -rf "${pkgdir}/var"
+
+  install -m755 -d "${pkgdir}/usr/share/licenses/xorg-server-devel"
+  ln -sf ../xorg-server-common/COPYING "${pkgdir}/usr/share/licenses/xorg-server-devel/COPYING"
+}
+md5sums=('3e47777ff034a331aed2322b078694a8'
+         '75a60eb4b99b64cda18614e9c085a2d3'
+         'ec10c9be9a7f1b352393684b658976d2'
+         '2b12a0032984901a8c4b6311fbd14e54'
+         '927ebd3870b26d669bfb0a0142ba5a63'
+         'e6284fbb111a924b0c617d01fe570fd3'
+         '7411b4a6c271c62bfc7abfcee3c22550'
+         '134cb9affc5abfd29b23c5696cdef53f'
+         '52fd3effd80d7bc6c1660d4ecf23d31c'
+         '376c70308715cd2643f7bff936d9934b')
+md5sums=('3e47777ff034a331aed2322b078694a8'
+         '75a60eb4b99b64cda18614e9c085a2d3'
+         'ec10c9be9a7f1b352393684b658976d2'
+         '2b12a0032984901a8c4b6311fbd14e54'
+         '927ebd3870b26d669bfb0a0142ba5a63'
+         'e6284fbb111a924b0c617d01fe570fd3'
+         '7411b4a6c271c62bfc7abfcee3c22550'
+         'd2dd1b18c7d07a7f17624b468c248a00'
+         '52fd3effd80d7bc6c1660d4ecf23d31c'
+         '376c70308715cd2643f7bff936d9934b')
