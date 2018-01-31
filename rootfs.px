@@ -353,14 +353,96 @@ sub deploy_packages
 	spawn(qw(fakeroot -i rootfs.tmp -s rootfs.tmp), 'sh', $script);
 }
 
-sub fix_package_files
+sub fix_xorg_fonts_dir
 {
 	system("cd rootfs/usr/share/fonts/misc && mkfontdir");
 }
 
 sub fix_pacman_files
 {
-	# TODO
+	my $pdir = shift;
+	my @desc;
+
+	open(TAROUT, '<', "$pdir/tarout") || die "$pdir/tarout: $!";
+	open(FILES, '>', "$pdir/files") || die "$pdir/files: $!";
+
+	print FILES "%FILES%\n";
+
+	while(<TAROUT>) {
+		s/^x //;
+		next if m!^\.!;
+		print FILES;
+	}
+
+	close(FILES);
+	close(TAROUT);
+
+	unlink("$pdir/tarout");
+}
+
+@info2desc = (
+	[ 'pkgname',     'NAME'        ],
+	[ 'pkgver',      'VERSION'     ],
+	[ 'pkgbase',     'BASE'        ],
+	[ 'pkgdesc',     'DESC'        ],
+	[ 'url',         'URL'         ],
+	[ 'arch',        'ARCH'        ],
+	[ 'builddate',   'BUILDDATE'   ],
+	[ 'installdate', 'INSTALLDATE' ],
+	[ 'packager',    'PACKAGER'    ],
+	[ 'size',        'SIZE'        ],
+	[ 'license',     'LICENSE'     ],
+	[ 'depend',      'DEPENDS'     ],
+	[ 'optdepend',   'OPTDEPENDS'  ]
+);
+
+sub fix_pacman_desc
+{
+	my $pdir = shift;
+	my %info;
+	my ($pair, $val);
+
+	open(INFO, '<', "$pdir/pkginfo") || die "$pdir/pkginfo: $!";
+	while(<INFO>) {
+		chomp;
+		next if m!^#!;
+		next unless m!([^=]+) = (.*)!;
+		add_to_hash(\%info, $1, $2);
+	}
+	close(INFO);
+
+	$info{'installdate'} = time();
+
+	open(DESC, '>', "$pdir/desc") || die "$pdir/desc: $!";
+	select(DESC);
+
+	foreach $pair (@info2desc) {
+		my ($ik,$dk) = @$pair;
+
+		next unless exists $info{$ik};
+
+		print "%$dk%\n";
+		foreach $val (get_as_array(\%info, $ik)) {
+			print "$val\n";
+		}
+		print "\n";
+	}
+
+	select(STDOUT);
+	close(DESC);
+
+	unlink("$pdir/pkginfo");
+}
+
+sub fix_var_lib_pacman
+{
+	my $pdir;
+
+	foreach $pdir (glob("rootfs/var/lib/pacman/local/*")) {
+		next unless -f "$pdir/pkginfo";
+		fix_pacman_desc($pdir);
+		fix_pacman_files($pdir);
+	}
 }
 
 sub create_fs_image
@@ -396,8 +478,8 @@ foreach $pkg (@requested) {
 
 fetch_packages();
 deploy_packages();
-fix_package_files();
-fix_pacman_files();
+fix_xorg_fonts_dir();
+fix_var_lib_pacman();
 
 warn "Creating rootfs image\n";
 create_fs_image();
@@ -420,12 +502,10 @@ deploy() {
 	mkdir -p "$var"
 
 	rm -f rootfs/.[A-Z]*
-	bsdtar -C rootfs -xvf "$tar" 2> "$var/files"
+	bsdtar -C rootfs -xvf "$tar" 2> "$var/tarout"
 	mv rootfs/.MTREE "$var/mtree"
-	mv rootfs/.PKGINFO "$var/desc"
+	mv rootfs/.PKGINFO "$var/pkginfo"
 	rm -f rootfs/.[A-Z]*
-
-	touch "$var/desc"
 }
 
 final() {
