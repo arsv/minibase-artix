@@ -1,0 +1,21 @@
+#!/sbin/msh
+
+onexit /sbin/system/reboot
+
+setenv PATH /bin:/sbin:/usr/bin
+
+/sbin/kmount -vc /dev/pts
+/sbin/kmount -vc /run
+/sbin/kmount -vc /mnt
+/sbin/kmount -vc /tmp
+# remount root read-write
+/sbin/kmount -e /
+
+umask 0002
+
+/sbin/modprobe psmouse
+
+mkdir /run/ctrl
+mkdir /dev/input
+
+exec /sbin/service/super /sbin/system/reboot

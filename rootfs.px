@@ -1,0 +1,436 @@
+#!/usr/bin/perl
+
+$arch = 'x86_64';
+$artixlinux = 'https://mirrors.dotsrc.org/artix-linux/repos';
+$archlinux = 'https://mirror.netcologne.de/archlinux';
+
+@repos = (
+	[ './local',   'local',     undef       ],
+	[ $artixlinux, 'system',    "/os/$arch" ],
+	[ $artixlinux, 'world',     "/os/$arch" ],
+	[ $archlinux,  'extra',     "/os/$arch" ],
+	[ $archlinux,  'community', "/os/$arch" ]
+);
+
+@default = qw(linux minibase bash mesa pacman xorg-server xorg-fonts-misc
+		fluxbox rxvt-unicode pacman xorg-xrdb fontconfig
+		xf86-input-evdev xf86-input-synaptics strace);
+
+%pacpath = ( ); # bash => "bash-4.4.012-2"
+%pacinfo = ( ); # bash => { NAME => "bash", VERSION => "4.4.012-2", ... }
+%providers = ( ); # sh => [ "bash", "dash", "busybox" ]
+%available = ( ); # sh => "bash"
+%group = ( ); # lxqt => [ "lxqt-session", "lxqt-runner", ... ]
+%cache = ( ); # bash => 'cache/system/bash-4.4.012-2-x86_64.pkg.tar.xz'
+
+%installed = ( );
+%processing = ( );
+
+sub download
+{
+	my ($out, $url) = @_;
+
+	return if -f $out;
+
+	warn "Fetching $url\n";
+	spawn('curl', '-f', '-o', $out, $url);
+}
+
+sub copyfile
+{
+	my ($out, $path) = @_;
+
+	if(-f $out) {
+		my @dststat = stat($out);
+		my @srcstat = stat($path);
+
+		my $sizeok = ($dststat[7] == $srcstat[7]);
+		my $timeok = ($dststat[9] >= $srcstat[9]);
+
+		return if ($sizeok && $timeok);
+	}
+
+	warn "Copying $path\n";
+	system('cp', $path, $out);
+}
+
+sub remover
+{
+	my ($dir) = @_;
+	spawn('rm', '-fr', $dir);
+}
+
+sub untarto
+{
+	my ($out,$tar) = @_;
+	mkdir($out);
+	spawn('bsdtar', '-C', $out, '-xf', $tar);
+}
+
+sub spawn
+{
+	my $pid = fork();
+
+	if($pid == 0) {
+		exec(@_);
+		die("exec $_[0]: $!\n");
+	} elsif ($pid > 0) {
+		$ret = waitpid($pid, 0);
+		die("exec $_[0] failed\n") if $?;
+	}
+}
+
+sub get_as_array
+{
+	my ($hash, $key) = @_;
+
+	return () unless exists($hash->{$key});
+
+	my $val = $hash->{$key};
+
+	return @$val if ref($val) eq 'ARRAY';
+
+	return $val;
+}
+
+sub get_a_string
+{
+	my ($hash, $key) = @_;
+
+	return undef unless exists($hash->{$key});
+
+	my $val = $hash->{$key};
+
+	die if ref($val) eq 'ARRAY';
+
+	return $val;
+}
+
+sub add_to_hash
+{
+	my ($hash, $key, $val) = @_;
+
+	if(!exists($hash->{$key})) {
+		$hash->{$key} = $val;
+	} elsif(ref($hash->{$key}) eq 'ARRAY') {
+		push(@{$hash->{$key}}, $val);
+	} else {
+		$hash->{$key} = [ $hash->{$key}, $val ];
+	}
+}
+
+sub already
+{
+	my ($hash, $key) = @_;
+	return $hash->{$key} ? 1 : undef;
+}
+
+sub isurl
+{
+	return ($_[0] =~ m!^[^:]+://!);
+}
+
+sub update_repos
+{
+	mkdir('repos');
+
+	foreach (@repos) {
+		my ($pref, $repo, $suff) = @$_;
+
+		if(isurl($pref)) {
+			download("repos/$repo.db", "$pref/$repo$suff/$repo.db");
+		} else {
+			copyfile("repos/$repo.db", "$pref/$repo.db");
+		}
+	}
+
+	foreach (@repos) {
+		my ($pref, $repo, $suff) = @$_;
+		remover("repos/$repo");
+		untarto("repos/$repo", "repos/$repo.db");
+	}
+}
+
+sub package_url
+{
+	my ($from, $file) = @_;
+
+	foreach (@repos) {
+		my ($pref, $repo, $suff) = @$_;
+		next unless $repo eq $from;
+		
+		if(isurl($pref)) {
+			return "$pref/$repo$suff/$file";
+		} else {
+			return "$pref/$file";
+		}
+	}
+
+	die "cannot locate $from/$file";
+}
+
+sub fetch_packages
+{
+	mkdir('cache');
+
+	foreach $pkg (sort keys %installed) {
+		my $base = $installed{$pkg};
+		my $info = $pacinfo{$pkg} || die;
+
+		next unless $base =~ m!^([^/]+)/(.*)!;
+		my $repo = $1;
+		my $file = get_a_string($info, 'FILENAME');
+		my $out = "cache/$repo/$file";
+		my $url = package_url($repo, $file);
+
+		mkdir("cache/$repo");
+
+		$cache{$pkg} = $out;
+
+		if(isurl($url)) {
+			download($out, $url);
+		} else {
+			copyfile($out, $url);
+		}
+	}
+}
+
+sub load_pacinfo
+{
+	my ($base) = @_;
+	my $path = "repos/$base/desc";
+	my %info = ( );
+	my $key;
+
+	open(INFO, '<', $path) || die "$path: $!\n";
+	while(<INFO>) {
+		chomp;
+
+		if(m!^%(\S+)%!) {
+			$key = $1;
+		} elsif(!m!\S!) {
+			undef $key;
+		} else {
+			add_to_hash(\%info, $key, $_);
+		}
+	}
+	close(INFO);
+
+	return \%info;
+}
+
+sub load_package_data
+{
+	my ($pkg, $base) = @_;
+	my $info = load_pacinfo($base);
+	my ($dep, $grp);
+
+	return if defined($pacpath{$pkg});
+
+	$pacpath{$pkg} = $base;
+	$pacinfo{$pkg} = $info;
+
+	foreach $dep (get_as_array($info, 'PROVIDES')) {
+		$dep =~ s![>=].*!!;
+		add_to_hash(\%providers, $dep, $pkg);
+	}
+
+	foreach $grp (get_as_array($info, 'GROUPS')) {
+		add_to_hash(\%group, $grp, $pkg);
+	}
+}
+
+sub load_packages
+{
+	my ($repo, $path);
+	my ($rep, $ent);
+
+	foreach $rep (@repos) {
+		my (undef, $repo, undef) = @$rep;
+		opendir(REPO, "repos/$repo") || die;
+		while(defined($ent = readdir(REPO))) {
+			next unless $ent =~ m!^((.*)-[^-]+-[0-9.]+)$!;
+			load_package_data($2, "$repo/$1");
+		}
+		closedir(REPO);
+	}
+}
+
+sub need_provided
+{
+	my ($pkg, $base, $dep) = @_;
+	my @opts = get_as_array(\%providers, $dep);
+
+	if(scalar(@opts) < 1) {
+		die "$base needs $dep\n";
+	} elsif(scalar(@opts) == 1) {
+		enqueue_with_deps($opts[0]);
+	} else {
+		die "$base needs $dep: ".join(', ', @opts)."\n";
+	}
+}
+
+sub need_dependency
+{
+	my ($pkg, $base, $dep) = @_;
+
+	die "missing $dep for $base\n" unless exists $pacinfo{$dep};
+
+	enqueue_with_deps($dep);
+}
+
+sub enqueue_with_deps
+{
+	my ($pkg) = @_;
+
+	my $base = $pacpath{$pkg} || die "$pkg";
+	my $info = $pacinfo{$pkg} || die "$pkg";
+
+	return if already(\%installed, $base);
+
+	$processing{$pkg} = $base;
+	$available{$pkg} = $base;
+
+	foreach $dep (get_as_array($info, 'PROVIDES')) {
+		$dep =~ s/[>=].*//;
+		$available{$dep} = $base;
+	}
+
+	foreach $dep (get_as_array($info, 'DEPENDS')) {
+		$dep =~ s/[>=].*//;
+
+		next if already(\%available, $dep);
+
+		if(exists($providers{$dep})) {
+			need_provided($pkg, $base, $dep);
+		} else {
+			need_dependency($pkg, $base, $dep);
+		}
+	}
+
+	undef $processing{$pkg};
+
+	$installed{$pkg} = $base;
+}
+
+sub enqueue_group
+{
+	my ($grp) = @_;
+
+	foreach(get_as_array(\%group, $grp)) {
+		enqueue_with_deps($_);
+	}
+}
+
+sub deploy_packages
+{
+	my $pkg;
+	my $script = 'rootfs.sh';
+
+	#remover('rootfs');
+	mkdir('rootfs');
+
+	open(TEMP, '>', $script) || die;
+	select TEMP;
+
+	while(<DATA>) { print; }
+	
+	foreach $pkg (sort keys %installed) {
+		my $base = $installed{$pkg} || die;
+		my $file = $cache{$pkg} || die;
+
+		$base =~ s!.*/!!;
+
+		print "deploy $base $file\n";
+	}
+
+	print "\nfinal\n";
+
+	select STDOUT;
+	close(TEMP);
+
+	spawn(qw(touch rootfs.tmp));
+	spawn(qw(fakeroot -i rootfs.tmp -s rootfs.tmp), 'sh', $script);
+}
+
+sub fix_package_files
+{
+	system("cd rootfs/usr/share/fonts/misc && mkfontdir");
+}
+
+sub fix_pacman_files
+{
+	# TODO
+}
+
+sub create_fs_image
+{
+	my $size = `du -sbk rootfs | sed -e 's/\t.*//'`;
+
+	$size += $size/5;
+	$size = int(($size+1023)/1024)*1024;
+
+	unlink('rootfs.img');
+
+	spawn(qw(fakeroot -i rootfs.tmp),
+		qw(mkfs.ext4 -m 0 -q -d rootfs rootfs.img), $size);
+}
+
+@requested = @ARGV ? @ARGV : @default;
+
+update_repos();
+
+warn "Loading package data\n";
+load_packages();
+
+warn "Resolving package dependencies\n";
+foreach $pkg (@requested) {
+	if(exists($group{$pkg})) {
+		enqueue_group($pkg);
+	} elsif(exists($pacinfo{$pkg})) {
+		enqueue_with_deps($pkg);
+	} else {
+		die "unknown package $pkg\n";
+	}
+}
+
+fetch_packages();
+deploy_packages();
+fix_package_files();
+fix_pacman_files();
+
+warn "Creating rootfs image\n";
+create_fs_image();
+
+__DATA__
+#!/bin/sh
+
+set -e
+
+deploy() {
+	pkg=$1
+	tar=$2
+
+	var=rootfs/var/lib/pacman/local/$pkg
+
+	test "$var/desc" -nt "$tar" && return
+
+	echo "Deploying $pkg" >&2
+
+	mkdir -p "$var"
+
+	rm -f rootfs/.[A-Z]*
+	bsdtar -C rootfs -xvf "$tar" 2> "$var/files"
+	mv rootfs/.MTREE "$var/mtree"
+	mv rootfs/.PKGINFO "$var/desc"
+	rm -f rootfs/.[A-Z]*
+
+	touch "$var/desc"
+}
+
+final() {
+	chown -R 0:0 dropin
+	cp -at rootfs/ dropin/*
+	chown -R 1:1 rootfs/home
+}
+

@@ -1,0 +1,9 @@
+/rootfs
+/repos
+/cache
+/rootfs.sh
+/*.img
+/*.tmp
+/bootfs/linux
+/initrd/lib
+/initrd/sbin

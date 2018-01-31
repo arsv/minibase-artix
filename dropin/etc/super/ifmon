@@ -1,0 +1,6 @@
+#!/sbin/msh
+
+# ifmon expects wsupp in PATH
+setenv PATH "/sbin/service:/sbin"
+
+exec /sbin/service/ifmon
