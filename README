@@ -1,6 +1,9 @@
 Build scripts for Artix+minibase qemu images.
 Run `make` to build and `./xqemu.sh` to boot.
 
+Build requirements: make, curl, bsdtar, fakeroot, perl,
+    mkfontdir, mkfs.ext4, mkfs.fat, cpio, syslinux, modprobe.
+
 Pre-built xorg-server and minibase packages are in ./local
 PKGBUILDs for them are in ./build but re-building them is
 left out of Makefile because it requires makepkg and a host
@@ -9,3 +12,22 @@ system running either Artix or mainline Arch Linux.
 The list of packages to include is at the top of ./rootfs.px
 
 Beware the complete image is over 1GB!
+
+
+Once the system is running:
+
+    Ctrl-F2: root console
+    Ctrl-F3: 1st X session (also default)
+    Ctrl-F5: 2nd X session
+    Ctrl-Esc: control VT, commands there:
+
+        Shift-P: poweroff
+	Shift-R: reboot
+	Esc: go back
+
+To use pacman, make sure to initialize its db for the root console:
+
+    pacman-db-upgrade 
+
+There's also a serial console on the 1st serial port in qemu.
+Hit Ctrl-Alt-2 (or 3) to switch there. Go back with Ctrl-Alt-1.
