@@ -14,6 +14,7 @@ setenv PATH /bin:/sbin:/usr/bin
 umask 0002
 
 /sbin/modprobe psmouse
+/sbin/modprobe evdev
 
 mkdir /run/ctrl
 mkdir /dev/input

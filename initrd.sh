@@ -16,13 +16,20 @@ cp -at $sdst $ssrc/runwith
 cp -at $sdst $ssrc/kmount
 cp -at $sdst $ssrc/msh
 
-linux=`ls rootfs/var/lib/pacman/local | grep 'linux-[3-9]'`
-kver=`echo "$linux" | sed -e 's/linux-//' -e 's/$/-ARTIX/'`
+kver=`ls rootfs/usr/lib/modules | grep '^[3-4]' | head -1`
+
+if [ -z "$kver" ]; then
+	echo "Cannot determine kernel version" >&2
+	exit 1
+elif [ ! -d "rootfs/usr/lib/modules/$kver" ]; then
+	echo "No modules in rootfs for $kver" >&2
+	exit 2
+fi
 
 msrc=rootfs/lib/modules/$kver/kernel
 mdst=initrd/lib/modules/$kver/kernel
 
-rm -fr $mdst; mkdir -p $mdst
+rm -fr initrd/lib/modules; mkdir -p $mdst
 
 addkobj() {
 	ksrc="$msrc/$1"
